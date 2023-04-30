@@ -1,0 +1,12 @@
+[package]
+name = "littleguy"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+dotenvy = "0.15.6"
+openai = "1.0.0-alpha.8"
+tokio = { version = "1.26.0", features = ["full"] }
+indoc = "2.0.1"
