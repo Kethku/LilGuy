@@ -1,21 +1,17 @@
 mod ai;
+mod classifiers;
 
-use ai::little_guy;
+use ai::{astro, greeter};
+use classifiers::is_instruction;
 use dotenvy::dotenv;
-use openai::chat::{ChatCompletionMessage, ChatCompletionMessageRole};
-use serenity::futures::StreamExt;
 use serenity::prelude::GatewayIntents;
 use std::env;
-use std::fs::OpenOptions;
-use std::io::prelude::*;
 use tokio_cron_scheduler::{Job, JobScheduler};
 
 use serenity::async_trait;
 use serenity::model::channel::Message;
 use serenity::model::gateway::Ready;
 use serenity::prelude::*;
-
-use crate::ai::little_guy_greeter;
 
 struct Handler;
 
@@ -28,45 +24,54 @@ impl EventHandler for Handler {
                 .as_ref()
                 .map(|message| message.author.bot)
                 .unwrap_or_default()
+            || (msg.content.to_lowercase().contains("astro") && !msg.author.bot)
         {
             msg.react(&ctx.http, '👀').await.unwrap();
 
-            let mut channel_messages = msg.channel_id.messages_iter(&ctx.http).boxed();
-            let mut completion_messages = Vec::new();
-            while let Some(Ok(channel_message)) = channel_messages.next().await {
-                if channel_message.author.bot {
-                    completion_messages.push(ChatCompletionMessage {
-                        role: ChatCompletionMessageRole::Assistant,
-                        content: channel_message.content,
-                        name: None,
-                    });
-                } else {
-                    completion_messages.push(ChatCompletionMessage {
-                        role: ChatCompletionMessageRole::User,
-                        content: channel_message.content.replace("<@598740888562302977>", ""),
-                        name: None,
-                    });
-                }
-
-                if completion_messages.len() > 3 {
-                    break;
-                }
+            if msg.channel_id == 598338172958670862 {
+                // react with a shooshing face
+                msg.react(&ctx.http, '🤫').await.unwrap();
+                return;
             }
-            completion_messages.reverse();
 
-            let response = little_guy(&completion_messages).await;
-
-            if let Ok(response) = response {
-                if let Err(why) = msg.channel_id.say(&ctx.http, response).await {
-                    println!("Error sending message: {:?}", why);
-                }
-            } else {
-                if let Err(why) = msg
-                    .channel_id
-                    .say(&ctx.http, "I'm sorry, I don't know what to say.")
+            if msg.content.contains("transcript") {
+                msg.react(&ctx.http, '📜').await.unwrap();
+                msg.channel_id
+                    .say(
+                        &ctx.http,
+                        std::fs::read_to_string("./astro.txt").unwrap_or_default(),
+                    )
                     .await
-                {
-                    println!("Error sending message: {:?}", why);
+                    .ok();
+                return;
+            }
+
+            let response = if msg.content.contains("greet") {
+                greeter().await
+            } else {
+                let instruction = is_instruction(&msg.content).await.unwrap_or_default();
+                if instruction {
+                    // react with a check mark
+                    msg.react(&ctx.http, '✅').await.unwrap();
+                };
+                astro(&msg.content, instruction).await
+            };
+
+            match response {
+                Ok(response) => {
+                    if let Err(why) = msg.channel_id.say(&ctx.http, response).await {
+                        println!("Error sending message: {:?}", why);
+                    }
+                }
+                Err(why) => {
+                    println!("Error generating message: {:?}", why);
+                    if let Err(why) = msg
+                        .channel_id
+                        .say(&ctx.http, "I'm sorry, I don't know what to say.")
+                        .await
+                    {
+                        println!("Error sending message: {:?}", why);
+                    }
                 }
             }
         }
@@ -78,42 +83,29 @@ impl EventHandler for Handler {
         let scheduler = JobScheduler::new()
             .await
             .expect("Could not create scheduler");
-        let job = Job::new_async("0 0 9 * * * *", move |_, _| {
+        let job = Job::new_async("0 0 16 * * * *", move |_, _| {
             let http = context.http.clone();
             Box::pin(async move {
-                println!("Computing greeting");
-                // Read previous greetings from file at `./greetings.txt`
-                let previous_greetings = std::fs::read_to_string("./greetings.txt")
-                    .unwrap_or_else(|_| String::new())
-                    .split('\n')
-                    .map(|line| line.to_string())
-                    .collect::<Vec<String>>();
+                let greeting = greeter().await.expect("Could not compute greeting");
 
-                let greeting = little_guy_greeter(&previous_greetings)
-                    .await
-                    .expect("Could not compute greeting");
-
-                println!("Sending greeting");
-                http.get_channel(598744899030089728)
+                http.get_channel(598338172958670862)
                     .await
                     .unwrap()
                     .id()
                     .say(&http, greeting.clone())
                     .await
                     .unwrap();
-
-                let mut file = OpenOptions::new()
-                    .write(true)
-                    .append(true)
-                    .open("./greetings.txt")
-                    .unwrap();
-                writeln!(file, "{}", greeting).expect("Could not add greeting to the file");
             })
         })
         .expect("Could not create job");
-        scheduler.add(job).await;
-        println!("Starting greeting schedule");
-        scheduler.start().await;
+        scheduler
+            .add(job)
+            .await
+            .expect("Could not add job to schedule");
+        scheduler
+            .start()
+            .await
+            .expect("Could not start job scheduler");
     }
 }
 
