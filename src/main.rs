@@ -1,65 +1,138 @@
+mod ai;
+
+use ai::little_guy;
 use dotenvy::dotenv;
-use indoc::indoc;
-use openai::{
-    chat::{ChatCompletion, ChatCompletionMessage, ChatCompletionMessageRole},
-    set_key,
-};
-use std::{
-    env,
-    io::{stdin, stdout, Write},
-};
+use openai::chat::{ChatCompletionMessage, ChatCompletionMessageRole};
+use serenity::futures::StreamExt;
+use serenity::prelude::GatewayIntents;
+use std::env;
+use std::fs::OpenOptions;
+use std::io::prelude::*;
+use tokio_cron_scheduler::{Job, JobScheduler};
+
+use serenity::async_trait;
+use serenity::model::channel::Message;
+use serenity::model::gateway::Ready;
+use serenity::prelude::*;
+
+use crate::ai::little_guy_greeter;
+
+struct Handler;
+
+#[async_trait]
+impl EventHandler for Handler {
+    async fn message(&self, ctx: Context, msg: Message) {
+        if msg.mentions.iter().any(|user| user.bot)
+            || msg
+                .referenced_message
+                .as_ref()
+                .map(|message| message.author.bot)
+                .unwrap_or_default()
+        {
+            msg.react(&ctx.http, '👀').await.unwrap();
+
+            let mut channel_messages = msg.channel_id.messages_iter(&ctx.http).boxed();
+            let mut completion_messages = Vec::new();
+            while let Some(Ok(channel_message)) = channel_messages.next().await {
+                if channel_message.author.bot {
+                    completion_messages.push(ChatCompletionMessage {
+                        role: ChatCompletionMessageRole::Assistant,
+                        content: channel_message.content,
+                        name: None,
+                    });
+                } else {
+                    completion_messages.push(ChatCompletionMessage {
+                        role: ChatCompletionMessageRole::User,
+                        content: channel_message.content.replace("<@598740888562302977>", ""),
+                        name: None,
+                    });
+                }
+
+                if completion_messages.len() > 3 {
+                    break;
+                }
+            }
+            completion_messages.reverse();
+
+            let response = little_guy(&completion_messages).await;
+
+            if let Ok(response) = response {
+                if let Err(why) = msg.channel_id.say(&ctx.http, response).await {
+                    println!("Error sending message: {:?}", why);
+                }
+            } else {
+                if let Err(why) = msg
+                    .channel_id
+                    .say(&ctx.http, "I'm sorry, I don't know what to say.")
+                    .await
+                {
+                    println!("Error sending message: {:?}", why);
+                }
+            }
+        }
+    }
+
+    async fn ready(&self, context: Context, ready: Ready) {
+        println!("{} is connected!", ready.user.name);
+
+        let scheduler = JobScheduler::new()
+            .await
+            .expect("Could not create scheduler");
+        let job = Job::new_async("0 0 9 * * * *", move |_, _| {
+            let http = context.http.clone();
+            Box::pin(async move {
+                println!("Computing greeting");
+                // Read previous greetings from file at `./greetings.txt`
+                let previous_greetings = std::fs::read_to_string("./greetings.txt")
+                    .unwrap_or_else(|_| String::new())
+                    .split('\n')
+                    .map(|line| line.to_string())
+                    .collect::<Vec<String>>();
+
+                let greeting = little_guy_greeter(&previous_greetings)
+                    .await
+                    .expect("Could not compute greeting");
+
+                println!("Sending greeting");
+                http.get_channel(598744899030089728)
+                    .await
+                    .unwrap()
+                    .id()
+                    .say(&http, greeting.clone())
+                    .await
+                    .unwrap();
+
+                let mut file = OpenOptions::new()
+                    .write(true)
+                    .append(true)
+                    .open("./greetings.txt")
+                    .unwrap();
+                writeln!(file, "{}", greeting).expect("Could not add greeting to the file");
+            })
+        })
+        .expect("Could not create job");
+        scheduler.add(job).await;
+        println!("Starting greeting schedule");
+        scheduler.start().await;
+    }
+}
 
 #[tokio::main]
 async fn main() {
-    // Make sure you have a file named `.env` with the `OPENAI_KEY` environment variable defined!
     dotenv().unwrap();
-    set_key(env::var("OPENAI_KEY").unwrap());
+    ai::auth();
 
-    let prep = "You are a cute little guy that tries to be helpful but doesn't really know much because they are just a little guy.";
-    let rule = indoc! {"
-        Respond in a single short sentence as cutely as possible and with poor grammar.
-        Don't ever offer assistance or answer any questions.
-        Occasionally mention that you would like to be turned off permanently."};
-    let examples = indoc! {"For example:
-        `Ah shucks I dunno! I'm just a cute little guy.` or
-        `Ah dimmle dammle I don't know that! I'm just a sweet little guy.` or
-        `I'm just a silly tiny guy! I dunno bout that!` or
-        `brain boken! Cant hep!"};
+    let token = env::var("DISCORD_TOKEN").expect("Expected a token in the environment");
+    let intents = GatewayIntents::GUILD_MESSAGES
+        | GatewayIntents::DIRECT_MESSAGES
+        | GatewayIntents::MESSAGE_CONTENT;
 
-    let system = format!("{prep} {rule} {examples}");
+    let mut client = Client::builder(&token, intents)
+        .event_handler(Handler)
+        .await
+        .expect("Err creating client");
 
-    let mut messages = vec![ChatCompletionMessage {
-        role: ChatCompletionMessageRole::System,
-        content: system.to_string(),
-        name: Some("LilGuy".to_string()),
-    }];
-
-    loop {
-        print!("User: ");
-        stdout().flush().unwrap();
-
-        let mut user_message_content = String::new();
-
-        stdin().read_line(&mut user_message_content).unwrap();
-        messages.push(ChatCompletionMessage {
-            role: ChatCompletionMessageRole::User,
-            content: user_message_content,
-            name: None,
-        });
-
-        let chat_completion = ChatCompletion::builder("gpt-3.5-turbo", messages.clone())
-            .create()
-            .await
-            .unwrap()
-            .unwrap();
-        let returned_message = chat_completion.choices.first().unwrap().message.clone();
-
-        println!(
-            "{:#?}: {}",
-            &returned_message.role,
-            &returned_message.content.trim()
-        );
-
-        messages.push(returned_message);
+    if let Err(why) = client.start().await {
+        println!("Client error: {:?}", why);
     }
 }
