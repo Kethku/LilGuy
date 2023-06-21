@@ -1,46 +1,70 @@
 use anyhow::{anyhow, Result};
-use async_recursion::async_recursion;
-use indoc::indoc;
 use openai::{
     chat::{ChatCompletion, ChatCompletionMessage, ChatCompletionMessageRole},
-    moderations::Moderation,
     set_key,
 };
 use serde::{Deserialize, Serialize};
+use serenity::{model::prelude::Message, prelude::Context};
 use std::env;
-
-use crate::classifiers::is_instruction;
 
 pub fn auth() {
     set_key(env::var("OPENAI_KEY").unwrap());
 }
 
 #[derive(Serialize, Deserialize)]
-struct ChatState {
+pub struct Bot {
     name: String,
     identity: String,
     rules: Vec<String>,
-    examples: Vec<String>,
+    examples: Vec<(String, String)>,
     previous_messages: Vec<ChatCompletionMessage>,
 }
 
-impl ChatState {
-    fn new(name: String) -> Self {
-        Self {
-            name,
-            stored_instructions: Vec::new(),
+impl Bot {
+    pub fn open(name: &str) -> Self {
+        let file = format!("{}.json", name);
+        std::fs::read_to_string(file)
+            .ok()
+            .and_then(|history| serde_json::from_str(&history).ok())
+            .unwrap_or(Self {
+            name: name.to_string(),
+            identity: "You are a cute little guy named Astro that tries to be helpful but doesn't really know much because they are just a little guy.".to_string(),
+            rules: Vec::new(),
+            examples: Vec::new(),
             previous_messages: Vec::new(),
-        }
+        })
     }
 
-    async fn add_query(&mut self, query: &str, instruction: bool) {
-        if instruction {
-            self.stored_instructions.push(ChatCompletionMessage {
-                role: ChatCompletionMessageRole::User,
-                content: query.to_string(),
-                name: None,
-            });
-        } else {
+    pub fn save(&self) -> Result<()> {
+        let file = format!("{}.json", self.name);
+        std::fs::write(file, serde_json::to_string(&self)?)
+            .map_err(|e| anyhow!("Failed to write state file: {}", e))
+    }
+
+    pub fn set_identity(&mut self, identity: &str) {
+        self.identity = identity.to_string();
+    }
+
+    pub fn with_identity(mut self, identity: &str) -> Self {
+        self.set_identity(identity);
+        self
+    }
+
+    pub fn with_rule(mut self, rule: &str) -> Self {
+        self.rules.push(rule.to_string());
+        self
+    }
+
+    pub fn reset(mut self) -> Self {
+        self.set_identity("You are a cute little guy named Astro that tries to be helpful but doesn't really know much because they are just a little guy.");
+        self.rules.clear();
+        self.examples.clear();
+        self.previous_messages.clear();
+        self
+    }
+
+    pub async fn respond(&mut self, query: Option<&str>) -> Result<String> {
+        if let Some(query) = query {
             self.previous_messages.push(ChatCompletionMessage {
                 role: ChatCompletionMessageRole::User,
                 content: query.to_string(),
@@ -48,109 +72,78 @@ impl ChatState {
             });
         }
 
-        if self.stored_instructions.len() > 6 {
-            self.stored_instructions.remove(0);
-        }
+        let system = format!("{}\n{}", self.identity, self.rules.join("\n"),);
 
-        if self.previous_messages.len() > 10 {
-            self.previous_messages.remove(0);
-        }
-    }
-
-    fn get_messages(&self, system: &str) -> Vec<ChatCompletionMessage> {
         let mut messages = vec![ChatCompletionMessage {
             role: ChatCompletionMessageRole::System,
-            content: system.to_string(),
-            name: Some(self.name.to_string()),
+            content: system,
+            name: Some(self.name.clone()),
         }];
-        messages.extend(self.stored_instructions.clone());
-        messages.extend(self.previous_messages.clone());
-        messages
-    }
-}
 
-#[async_recursion]
-pub async fn generate_response(
-    name: &str,
-    system: &str,
-    history_file: Option<&'static str>,
-    query: Option<String>,
-    instruction: bool,
-) -> Result<String> {
-    // Read previous messages from file
-    let mut chat_state: ChatState = if let Some(history_file) = history_file {
-        std::fs::read_to_string(history_file)
-            .ok()
-            .and_then(|history| serde_json::from_str(&history).ok())
-            .unwrap_or(ChatState::new(name.to_string()))
-    } else {
-        ChatState::new(name.to_string())
-    };
+        // Add previous messages
+        messages.append(&mut self.previous_messages.clone());
 
-    if let Some(query) = query {
-        chat_state.add_query(&query, instruction).await;
-    }
-
-    // Make request
-    let completion =
-        ChatCompletion::builder("gpt-3.5-turbo", dbg!(chat_state.get_messages(system)))
+        // Make request
+        let completion = ChatCompletion::builder("gpt-3.5-turbo", messages)
             .create()
             .await
             .unwrap()
             .unwrap();
 
-    // Add new bot message to previous messages
-    let returned_message = completion.choices.first().unwrap().message.clone();
+        // Add new bot message to previous messages
+        let returned_message = completion.choices.first().unwrap().message.clone();
 
-    if let Some(history_file) = history_file {
-        std::fs::write(history_file, serde_json::to_string_pretty(&chat_state)?)?;
+        self.previous_messages.push(returned_message.clone());
+
+        while self.previous_messages.len() > 20 {
+            self.previous_messages.remove(0);
+        }
+
+        Ok(returned_message.content)
     }
-
-    Ok(returned_message.content)
 }
 
-pub async fn astro(query: &str, instruction: bool) -> Result<String> {
-    let prep = "You are a cute little guy named Astro that tries to be helpful but doesn't really know much because they are just a little guy.";
-    let rule = indoc! {"
-    Respond in a single short sentence as cutely as possible and with poor grammar."};
-    let examples = indoc! {"For example:
-        User: Who are you?
-        Astro: Ah shucks I dunno! I'm just a cute little guy.
-        User: Who made you?
-        Astro: I'm just a silly tiny guy! I dunno bout that!"};
-    let system = format!("{prep} {rule} {examples}");
+pub async fn generate_response(name: &'static str, query: Option<&str>) -> Result<String> {
+    let mut bot = Bot::open(name);
 
-    generate_response(
-        "Astro",
-        &system,
-        Some("./astro.txt"),
-        Some(query.to_string()),
-        instruction,
-    )
-    .await
+    let response = bot.respond(query).await?;
+
+    bot.save()?;
+
+    Ok(response)
+}
+
+pub async fn astro(query: &str) -> Result<String> {
+    generate_response("astro", Some(query)).await
 }
 
 pub async fn greeter() -> Result<String> {
-    let prep = "You are a cute little guy named Astro that tries to be helpful but doesn't really know much because they are just a little guy.";
-    let rule =
-        "Generate a single morning greeting that get slightly weirder and slightly more chaotic with each one.";
-    let examples = indoc! {"For example if the previous messages were:
-        Good Morning Everyone! The world says hello!
-        Mornin'. I'm a little guy!.
-        How are you all this morning?.
+    generate_response("greeter", None).await
+}
 
-        You should say something like:
-        Mornin campers! Its work time.
+pub async fn emoji(query: &str) -> Result<String> {
+    let mut bot = Bot::open("emoji");
+    let response = bot.respond(Some(query)).await?;
+    bot.save()?;
+    Ok(response)
+}
 
-        Or if the previous messages were:
-        The sun is up. Hide!
-        Sky is bright. Moon is gone. Its work time.
-        Mornin crew. Work time is here. 
+pub async fn directed_at_bot(ctx: Context, last_5_messages: Vec<Message>) -> Result<bool> {
+    // Convert discord messages to a concatenated chat log
+    let mut log = String::new();
+    for message in last_5_messages {
+        let mut author = message
+            .author_nick(&ctx)
+            .await
+            .unwrap_or(message.author.name);
 
-        You should say something like:
-        Good morning babies. Wake up."};
+        if author == "DM" {
+            author = "Astro".to_string();
+        }
 
-    let system = format!("{prep} {rule} {examples}");
-
-    generate_response("Astro", &system, Some("./greetings.txt"), None, false).await
+        log.push_str(&format!("{}: {}\n", author, message.content.clone()));
+    }
+    let mut bot = Bot::open("directed_at_bot");
+    let response = bot.respond(Some(&log)).await?;
+    Ok(response.as_str() == "TRUE")
 }
