@@ -67,8 +67,9 @@ impl Bot {
         if let Some(query) = query {
             self.previous_messages.push(ChatCompletionMessage {
                 role: ChatCompletionMessageRole::User,
-                content: query.to_string(),
+                content: Some(query.to_string()),
                 name: None,
+                function_call: None,
             });
         }
 
@@ -76,8 +77,9 @@ impl Bot {
 
         let mut messages = vec![ChatCompletionMessage {
             role: ChatCompletionMessageRole::System,
-            content: system,
+            content: Some(system),
             name: Some(self.name.clone()),
+            function_call: None,
         }];
 
         // Add previous messages
@@ -87,7 +89,6 @@ impl Bot {
         let completion = ChatCompletion::builder("gpt-3.5-turbo", messages)
             .create()
             .await
-            .unwrap()
             .unwrap();
 
         // Add new bot message to previous messages
@@ -99,7 +100,7 @@ impl Bot {
             self.previous_messages.remove(0);
         }
 
-        Ok(returned_message.content)
+        Ok(returned_message.content.unwrap())
     }
 }
 
