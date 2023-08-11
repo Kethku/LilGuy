@@ -1,9 +1,7 @@
-use std::sync::atomic::Ordering;
-
 use anyhow::{Context as AnyhowContext, Result};
-use serenity::{async_trait, futures::StreamExt, model::prelude::Message, prelude::Context};
+use serenity::{async_trait, model::prelude::Message, prelude::Context};
 
-use crate::{ai::directed_at_bot, ACTIVE_CONVO};
+use crate::ai::USERS;
 
 #[async_trait]
 pub trait MessageExt {
@@ -24,30 +22,16 @@ impl MessageExt for Message {
             None => false,
         };
 
-        if self.mentions_me(&ctx).await?
+        Ok(self.mentions_me(&ctx).await?
             || references_own_message
-            || self.content.to_lowercase().contains("astro")
-        {
-            return Ok(true);
-        }
-
-        if ACTIVE_CONVO.load(Ordering::Relaxed) != self.channel_id.0 {
-            return Ok(false);
-        }
-
-        let mut last_5_messages = self
-            .channel_id
-            .messages_iter(&ctx.http)
-            .take(5)
-            .map(|message| message.unwrap().clone())
-            .collect::<Vec<_>>()
-            .await;
-        last_5_messages.reverse();
-
-        directed_at_bot(ctx.clone(), last_5_messages).await
+            || self.content.to_lowercase().contains("astro"))
     }
 
     async fn reply_maybe_long(&self, ctx: &Context, mut response: String) -> Result<()> {
+        for user in USERS.keys() {
+            response = response.replace(&format!("@{user}"), &format!("<@{}>", USERS[user]));
+        }
+
         let mut replied = false;
         while let Some(overflow_length) = Message::overflow_length(&response) {
             let (first, second) = response.split_at(response.len() - overflow_length);

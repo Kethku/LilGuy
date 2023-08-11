@@ -1,150 +1,357 @@
-use anyhow::{anyhow, Result};
+use anyhow::Result;
+use async_recursion::async_recursion;
+use lazy_static::lazy_static;
 use openai::{
-    chat::{ChatCompletion, ChatCompletionMessage, ChatCompletionMessageRole},
+    chat::{
+        ChatCompletion, ChatCompletionFunctionDefinition, ChatCompletionMessage,
+        ChatCompletionMessageRole,
+    },
     set_key,
 };
-use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use serenity::{model::prelude::Message, prelude::Context};
-use std::env;
+use std::{
+    collections::HashMap,
+    env,
+    sync::atomic::{AtomicU64, Ordering},
+};
+
+use crate::extensions::MessageExt;
+
+pub static ACTIVE_CONVO: AtomicU64 = AtomicU64::new(0);
+
+lazy_static! {
+    pub static ref USERS: HashMap<&'static str, usize> = {
+        let mut hashmap = HashMap::new();
+        hashmap.insert("JonJo", 72878083471847424);
+        hashmap.insert("Kay", 143276836481269760);
+        hashmap.insert("Andrew", 142518394036420608);
+        hashmap.insert("Derek", 142889606260457472);
+        hashmap.insert("Chris", 296787008184123393);
+        hashmap.insert("Sidd", 143979701960966144);
+        hashmap.insert("Kebin", 215221184009076736);
+        hashmap.insert("Yves", 279027216459759626);
+        hashmap.insert("Daniel", 124634935872061444);
+        hashmap.insert("Alex", 144979023146123264);
+        hashmap.insert("Evan", 217010389152563202);
+        hashmap.insert("Grant", 388148320897335310);
+        hashmap.insert("Kevin", 172953593874350081);
+        hashmap
+    };
+}
 
 pub fn auth() {
     set_key(env::var("OPENAI_KEY").unwrap());
 }
 
-#[derive(Serialize, Deserialize)]
-pub struct Bot {
-    name: String,
-    identity: String,
-    rules: Vec<String>,
-    examples: Vec<(String, String)>,
-    previous_messages: Vec<ChatCompletionMessage>,
+fn astro_identity() -> String {
+    std::fs::read_to_string("identity.txt").unwrap()
 }
 
-impl Bot {
-    pub fn open(name: &str) -> Self {
-        let file = format!("{}.json", name);
-        std::fs::read_to_string(file)
-            .ok()
-            .and_then(|history| serde_json::from_str(&history).ok())
-            .unwrap_or(Self {
-            name: name.to_string(),
-            identity: "You are a cute little guy named Astro that tries to be helpful but doesn't really know much because they are just a little guy.".to_string(),
-            rules: Vec::new(),
-            examples: Vec::new(),
-            previous_messages: Vec::new(),
-        })
+fn previous_messages() -> Vec<ChatCompletionMessage> {
+    std::fs::read_to_string("messages.json")
+        .ok()
+        .and_then(|messages| serde_json::from_str(&messages).ok())
+        .unwrap_or_default()
+}
+
+fn append_message(message: &ChatCompletionMessage) {
+    let mut previous_messages = previous_messages();
+    previous_messages.push(message.clone());
+
+    while previous_messages.len() > 20 {
+        previous_messages.remove(0);
     }
 
-    pub fn save(&self) -> Result<()> {
-        let file = format!("{}.json", self.name);
-        std::fs::write(file, serde_json::to_string(&self)?)
-            .map_err(|e| anyhow!("Failed to write state file: {}", e))
-    }
+    std::fs::write(
+        "messages.json",
+        serde_json::to_string_pretty(&previous_messages).unwrap(),
+    )
+    .unwrap();
+}
 
-    pub fn set_identity(&mut self, identity: &str) {
-        self.identity = identity.to_string();
-    }
+fn opinions() -> HashMap<String, u8> {
+    std::fs::read_to_string("opinions.json")
+        .ok()
+        .and_then(|opinions| serde_json::from_str::<HashMap<String, u8>>(&opinions).ok())
+        .unwrap_or_default()
+}
 
-    pub fn with_identity(mut self, identity: &str) -> Self {
-        self.set_identity(identity);
-        self
-    }
+fn user_opinion(user_id: u64) -> u8 {
+    opinions().get(&user_id.to_string()).cloned().unwrap_or(50)
+}
 
-    pub fn with_rule(mut self, rule: &str) -> Self {
-        self.rules.push(rule.to_string());
-        self
-    }
+fn increment_user_opinion(user_id: u64) {
+    let mut opinions = opinions();
+    let user_id = user_id.to_string();
+    let new_opinion = (opinions.get(&user_id.to_string()).cloned().unwrap_or(50) + 15).min(100);
+    opinions.insert(user_id, new_opinion);
 
-    pub fn reset(mut self) -> Self {
-        self.set_identity("You are a cute little guy named Astro that tries to be helpful but doesn't really know much because they are just a little guy.");
-        self.rules.clear();
-        self.examples.clear();
-        self.previous_messages.clear();
-        self
-    }
+    std::fs::write(
+        "opinions.json",
+        serde_json::to_string_pretty(&opinions).unwrap(),
+    )
+    .unwrap();
+}
 
-    pub async fn respond(&mut self, query: Option<&str>) -> Result<String> {
-        if let Some(query) = query {
-            self.previous_messages.push(ChatCompletionMessage {
-                role: ChatCompletionMessageRole::User,
-                content: Some(query.to_string()),
-                name: None,
-                function_call: None,
-            });
+fn decrement_user_opinion(user_id: u64) {
+    let mut opinions = opinions();
+    let user_id = user_id.to_string();
+    let new_opinion = opinions
+        .get(&user_id.to_string())
+        .cloned()
+        .unwrap_or(50)
+        .saturating_sub(15);
+    opinions.insert(user_id, new_opinion);
+
+    std::fs::write(
+        "opinions.json",
+        serde_json::to_string_pretty(&opinions).unwrap(),
+    )
+    .unwrap();
+}
+
+pub fn reset() {
+    std::fs::write("messages.json", "[]").unwrap();
+}
+
+pub async fn respond(
+    ctx: &Context,
+    message: Message,
+    force_call: Option<&'static str>,
+) -> Result<()> {
+    if !message.requires_response(ctx).await? {
+        if ACTIVE_CONVO.load(Ordering::Relaxed) != message.channel_id.0 {
+            ACTIVE_CONVO.store(0, Ordering::Relaxed);
+            return Ok(());
         }
-
-        let system = format!("{}\n{}", self.identity, self.rules.join("\n"),);
-
-        let mut messages = vec![ChatCompletionMessage {
-            role: ChatCompletionMessageRole::System,
-            content: Some(system),
-            name: Some(self.name.clone()),
-            function_call: None,
-        }];
-
-        // Add previous messages
-        messages.append(&mut self.previous_messages.clone());
-
-        // Make request
-        let completion = ChatCompletion::builder("gpt-3.5-turbo", messages)
-            .create()
-            .await
-            .unwrap();
-
-        // Add new bot message to previous messages
-        let returned_message = completion.choices.first().unwrap().message.clone();
-
-        self.previous_messages.push(returned_message.clone());
-
-        while self.previous_messages.len() > 20 {
-            self.previous_messages.remove(0);
-        }
-
-        Ok(returned_message.content.unwrap())
     }
+
+    let author = message
+        .author_nick(&ctx)
+        .await
+        .unwrap_or(message.author.name.clone());
+    let new_message = ChatCompletionMessage {
+        role: ChatCompletionMessageRole::User,
+        content: Some(format!(
+            "{}: {}",
+            user_opinion(message.author.id.0),
+            message.content.clone()
+        )),
+        name: Some(author),
+        function_call: None,
+    };
+    // Add message to history
+    append_message(&new_message);
+
+    query_model(ctx, &message, force_call).await
 }
 
-pub async fn generate_response(name: &'static str, query: Option<&str>) -> Result<String> {
-    let mut bot = Bot::open(name);
+#[async_recursion]
+pub async fn query_model(
+    ctx: &Context,
+    message: &Message,
+    force_call: Option<&'static str>,
+) -> Result<()> {
+    // React with eyes to indicate the bot saw this.
+    message.react(ctx, '🤔').await?;
 
-    let response = bot.respond(query).await?;
+    // Setup identity
+    let mut messages = vec![ChatCompletionMessage {
+        role: ChatCompletionMessageRole::System,
+        content: Some(astro_identity()),
+        name: Some("Astro".to_string()),
+        function_call: None,
+    }];
 
-    bot.save()?;
+    // Add previous messages
+    messages.append(&mut previous_messages());
 
-    Ok(response)
-}
+    let chat_completion = ChatCompletion::builder("gpt-3.5-turbo", messages)
+        .functions(vec! [
+            ChatCompletionFunctionDefinition {
+                name: "react".to_string(),
+                description: Some("Takes a string with a single emoji and reacts to the last message in the transcript with it.".to_string()),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "emoji": {
+                            "type": "string",
+                            "description": "The emoji to react with."
+                        }
+                    },
+                })),
+            },
+            ChatCompletionFunctionDefinition {
+                name: "pin".to_string(),
+                description: Some("Pins the message the last message was replying to. If that fails, a reason why is returned.".to_string()),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {},
+                })),
+            },
+            ChatCompletionFunctionDefinition {
+                name: "unpin".to_string(),
+                description: Some("Unpins the message the last message was replying to. If that fails, a reason why is returned.".to_string()),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {},
+                })),
+            },
+            ChatCompletionFunctionDefinition {
+                name: "get_users".to_string(),
+                description: Some("Gets the users in the chat. Returns a list of users.".to_string()),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {},
+                })),
+            },
+            ChatCompletionFunctionDefinition {
+                name: "angry".to_string(),
+                description: Some("Marks that the author of the most recent message has been rude or mean.".to_string()),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {},
+                })),
+            },
+            ChatCompletionFunctionDefinition {
+                name: "happy".to_string(),
+                description: Some("Marks that the author of the most recent message has been kind or nice.".to_string()),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {},
+                })),
+            },
+            ChatCompletionFunctionDefinition {
+                name: "get_opinion".to_string(),
+                description: Some("Gets the opinion of a user by name. Returns a number from 0 to 100 with 0 meaning that the user is very rude and 100 meaning they are very kind.".to_string()),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "The name of the user to get the opinion of.",
+                        },
+                    },
+                })),
+            },
+            ChatCompletionFunctionDefinition {
+                name: "stop_listening".to_string(),
+                description: Some("Stops listening to the chat. Should be called when the last message isn't directed at Astro.".to_string()),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {},
+                })),
+            },
+        ])
+        .function_call(force_call.map(|function| json!({"name": function})).unwrap_or(json!("auto")))
+        .create()
+        .await?;
 
-pub async fn astro(query: &str) -> Result<String> {
-    generate_response("astro", Some(query)).await
-}
+    let returned_message = chat_completion.choices.first().unwrap().message.clone();
+    // Add response to history
+    append_message(&returned_message);
 
-pub async fn greeter() -> Result<String> {
-    generate_response("greeter", None).await
-}
+    message.delete_reaction_emoji(ctx, '🤔').await?;
 
-pub async fn emoji(query: &str) -> Result<String> {
-    let mut bot = Bot::open("emoji");
-    let response = bot.respond(Some(query)).await?;
-    bot.save()?;
-    Ok(response)
-}
+    ACTIVE_CONVO.store(message.channel_id.into(), Ordering::Relaxed);
 
-pub async fn directed_at_bot(ctx: Context, last_5_messages: Vec<Message>) -> Result<bool> {
-    // Convert discord messages to a concatenated chat log
-    let mut log = String::new();
-    for message in last_5_messages {
-        let mut author = message
-            .author_nick(&ctx)
-            .await
-            .unwrap_or(message.author.name);
+    if let Some(function_call) = returned_message.function_call.as_ref() {
+        match function_call.name.as_str() {
+            "react" => {
+                let arguments = serde_json::from_str::<Value>(&function_call.arguments).unwrap();
+                let reaction = arguments["emoji"].as_str().unwrap();
 
-        if author == "DM" {
-            author = "Astro".to_string();
+                if let Some(possible_emoji) = reaction.chars().next() {
+                    // Response might not be a valid emoji. Ignore if not
+                    message.react(&ctx.http, possible_emoji).await.ok();
+                }
+                dbg!(reaction);
+            }
+            "pin" => {
+                if let Some(referenced_message) = message.referenced_message.as_ref() {
+                    referenced_message.pin(&ctx.http).await.ok();
+                    dbg!("pinned message");
+                    query_model(&ctx, message, None).await?;
+                } else {
+                    append_message(&ChatCompletionMessage {
+                        role: ChatCompletionMessageRole::Function,
+                        content: Some("Last message was not a reply.".to_string()),
+                        name: Some("pin".to_string()),
+                        function_call: None,
+                    });
+                    dbg!("pin failed");
+                    query_model(&ctx, message, None).await?;
+                }
+            }
+            "unpin" => {
+                if let Some(referenced_message) = message.referenced_message.as_ref() {
+                    referenced_message.unpin(&ctx.http).await.ok();
+                    dbg!("unpinned message");
+                    query_model(&ctx, message, None).await?;
+                } else {
+                    append_message(&ChatCompletionMessage {
+                        role: ChatCompletionMessageRole::Function,
+                        content: Some("Last message was not a reply.".to_string()),
+                        name: Some("unpin".to_string()),
+                        function_call: None,
+                    });
+                    dbg!("unpin failed");
+                    query_model(&ctx, message, None).await?;
+                }
+            }
+            "get_users" => {
+                append_message(&ChatCompletionMessage {
+                    role: ChatCompletionMessageRole::Function,
+                    content: Some(format!(
+                        "[{}]",
+                        USERS.keys().cloned().collect::<Vec<_>>().join(", ")
+                    )),
+                    name: Some("get_users".to_string()),
+                    function_call: None,
+                });
+                query_model(&ctx, message, None).await?;
+            }
+            "angry" => {
+                decrement_user_opinion(message.author.id.0);
+                query_model(&ctx, message, None).await?;
+            }
+            "happy" => {
+                increment_user_opinion(message.author.id.0);
+                query_model(&ctx, message, None).await?;
+            }
+            "get_opinion" => {
+                let arguments = serde_json::from_str::<Value>(&function_call.arguments).unwrap();
+                let name = arguments["name"].as_str().unwrap();
+
+                let mut opinion = 50;
+                for (user, id) in USERS.iter() {
+                    if user.to_lowercase() == name.to_lowercase() {
+                        opinion = user_opinion(*id as u64);
+                    }
+                }
+
+                append_message(&ChatCompletionMessage {
+                    role: ChatCompletionMessageRole::Function,
+                    content: Some(opinion.to_string()),
+                    name: Some("get_opinion".to_string()),
+                    function_call: None,
+                });
+                query_model(&ctx, message, None).await?;
+            }
+
+            "stop_listening" => {
+                dbg!("stopped listening");
+                ACTIVE_CONVO.store(0, Ordering::Relaxed);
+            }
+            _ => {}
         }
-
-        log.push_str(&format!("{}: {}\n", author, message.content.clone()));
     }
-    let mut bot = Bot::open("directed_at_bot");
-    let response = bot.respond(Some(&log)).await?;
-    Ok(response.as_str() == "TRUE")
+
+    if let Some(response) = returned_message.content.as_ref() {
+        message.reply_maybe_long(&ctx, response.clone()).await?;
+        dbg!(response);
+    }
+
+    Ok(())
 }

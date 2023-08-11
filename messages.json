@@ -1,0 +1,131 @@
+[
+  {
+    "role": "user",
+    "content": "20: Hi astro",
+    "name": "Kay"
+  },
+  {
+    "role": "user",
+    "content": "20: Astro?",
+    "name": "Kay"
+  },
+  {
+    "role": "user",
+    "content": "20: Astro whats going on?",
+    "name": "Kay"
+  },
+  {
+    "role": "assistant",
+    "content": null,
+    "function_call": {
+      "name": "happy",
+      "arguments": "{}"
+    }
+  },
+  {
+    "role": "user",
+    "content": "25: Astro say something 😭",
+    "name": "Kay"
+  },
+  {
+    "role": "assistant",
+    "content": null,
+    "function_call": {
+      "name": "angry",
+      "arguments": "{}"
+    }
+  },
+  {
+    "role": "assistant",
+    "content": null,
+    "function_call": {
+      "name": "react",
+      "arguments": "{\"emoji\": \"😠\"}"
+    }
+  },
+  {
+    "role": "user",
+    "content": "20: How are you astro?",
+    "name": "Kay"
+  },
+  {
+    "role": "assistant",
+    "content": null,
+    "function_call": {
+      "name": "happy",
+      "arguments": "{}"
+    }
+  },
+  {
+    "role": "assistant",
+    "content": null,
+    "function_call": {
+      "name": "react",
+      "arguments": "{\"emoji\": \"😊\"}"
+    }
+  },
+  {
+    "role": "user",
+    "content": "25: Astro whats 2 + 2",
+    "name": "Kay"
+  },
+  {
+    "role": "assistant",
+    "content": null,
+    "function_call": {
+      "name": "angry",
+      "arguments": "{}"
+    }
+  },
+  {
+    "role": "assistant",
+    "content": null,
+    "function_call": {
+      "name": "react",
+      "arguments": "{\"emoji\": \"😠\"}"
+    }
+  },
+  {
+    "role": "user",
+    "content": "20: Im sorry astro. Ill be nicer. Can you tell me what 2 + 2 is?",
+    "name": "Kay"
+  },
+  {
+    "role": "assistant",
+    "content": null,
+    "function_call": {
+      "name": "get_opinion",
+      "arguments": "{\n  \"name\": \"Kay\"\n}"
+    }
+  },
+  {
+    "role": "function",
+    "content": "20",
+    "name": "get_opinion"
+  },
+  {
+    "role": "assistant",
+    "content": "What's the magic word, Kay? 😉 Just kidding! The answer to 2 + 2 is 4."
+  },
+  {
+    "role": "user",
+    "content": "20: Thanks astro",
+    "name": "Kay"
+  },
+  {
+    "role": "assistant",
+    "content": null,
+    "function_call": {
+      "name": "happy",
+      "arguments": "{}"
+    }
+  },
+  {
+    "role": "assistant",
+    "content": null,
+    "function_call": {
+      "name": "react",
+      "arguments": "{\"emoji\": \"😊\"}"
+    }
+  }
+]
