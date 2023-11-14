@@ -21,7 +21,7 @@ use extensions::MessageExt;
 struct Handler;
 
 pub const BRIDGE: u64 = 598338172958670862;
-const MUTED_CHANNELS: &[u64] = &[598338172958670862, 636801468011249666];
+const MUTED_CHANNELS: &[u64] = &[598338172958670862, 636801468011249666, 972919610649231430];
 
 #[async_trait]
 impl EventHandler for Handler {
